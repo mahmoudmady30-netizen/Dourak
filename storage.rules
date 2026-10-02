@@ -1,0 +1,12 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Dourak currently keeps business media as public-safe data URLs in
+    // Firestore. If Storage is enabled later, default-deny it until a
+    // business-owned path is used and validated server-side.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

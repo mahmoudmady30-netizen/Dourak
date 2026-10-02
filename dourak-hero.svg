@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 700">
+<defs>
+ <linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#062D29"/><stop offset=".58" stop-color="#0B6B5A"/><stop offset="1" stop-color="#D0A94F"/></linearGradient>
+ <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffffff" stop-opacity=".20"/><stop offset="1" stop-color="#ffffff" stop-opacity=".03"/></linearGradient>
+ <pattern id="grid" width="70" height="70" patternUnits="userSpaceOnUse"><path d="M70 0H0V70" fill="none" stroke="#fff" stroke-opacity=".09"/></pattern>
+</defs>
+<rect width="1600" height="700" fill="url(#g)"/>
+<circle cx="1240" cy="120" r="260" fill="#E8C76D" opacity=".12"/>
+<circle cx="280" cy="640" r="300" fill="#0AA48A" opacity=".12"/>
+<g opacity=".65">
+ <path d="M720 650V190l230-130v590z" fill="url(#glass)" stroke="#fff" stroke-opacity=".18"/>
+ <path d="M950 650V130l300-100v620z" fill="url(#glass)" stroke="#fff" stroke-opacity=".20"/>
+ <path d="M1250 650V210l190-70v510z" fill="url(#glass)" stroke="#fff" stroke-opacity=".16"/>
+ <path d="M770 240h400M770 330h400M770 420h400M770 510h400M770 600h400" stroke="#fff" stroke-opacity=".12"/>
+ <path d="M820 170v430M900 125v475M1010 110v490M1100 100v500M1190 80v520M1300 190v410M1370 170v430" stroke="#fff" stroke-opacity=".12"/>
+</g>
+<rect width="1600" height="700" fill="url(#grid)"/>
+</svg>

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 560" role="img" aria-labelledby="title desc">
+<title id="title">دورك</title><desc id="desc">شعار دورك: مجموعة أشخاص مع ساعة برتقالية</desc>
+<defs>
+ <linearGradient id="b1" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#38b5dc"/><stop offset="1" stop-color="#2d8fdc"/></linearGradient>
+ <linearGradient id="b2" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#2d8fdc"/><stop offset="1" stop-color="#1976d2"/></linearGradient>
+ <linearGradient id="b3" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#34bdb2"/><stop offset="1" stop-color="#18a99e"/></linearGradient>
+ <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="8" flood-opacity=".12"/></filter>
+</defs>
+<!-- people -->
+<g filter="url(#shadow)">
+ <circle cx="220" cy="125" r="61" fill="url(#b1)"/>
+ <path d="M145 292c0-69 34-111 75-111s75 42 75 111v18H145z" fill="url(#b1)"/>
+ <circle cx="385" cy="108" r="67" fill="url(#b2)"/>
+ <path d="M305 292c0-77 36-120 80-120s80 43 80 120v18H305z" fill="url(#b2)"/>
+ <circle cx="535" cy="135" r="60" fill="url(#b3)"/>
+ <path d="M460 292c0-68 34-109 75-109s75 41 75 109v18H460z" fill="url(#b3)"/>
+</g>
+<!-- orange clock -->
+<path d="M615 72a105 105 0 1 1-66 188l38-54a40 40 0 1 0 25-71z" fill="#ff8a16"/>
+<circle cx="624" cy="132" r="44" fill="#fff"/>
+<path d="M624 132v-28M624 132l22 13" fill="none" stroke="#ff8a16" stroke-width="8" stroke-linecap="round"/>
+<!-- Arabic wordmark -->
+<text x="400" y="415" text-anchor="middle" direction="rtl" unicode-bidi="bidi-override" font-family="Tahoma, Arial, 'Noto Sans Arabic', sans-serif" font-size="72" font-weight="900" fill="#123b5b">دورك</text>
+<text x="400" y="468" text-anchor="middle" direction="rtl" unicode-bidi="bidi-override" font-family="Tahoma, Arial, 'Noto Sans Arabic', sans-serif" font-size="25" font-weight="700" fill="#54708a">ودّع الانتظار... وخد دورك</text>
+</svg>

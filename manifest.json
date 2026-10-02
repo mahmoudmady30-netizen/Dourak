@@ -1,0 +1,27 @@
+{
+  "name": "دورك | Dourak — Smart Queue",
+  "short_name": "دورك",
+  "description": "منصة ذكية لإدارة الطوابير والمواعيد وتحسين تجربة العملاء.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F2F7F5",
+  "theme_color": "#087C68",
+  "dir": "rtl",
+  "lang": "ar",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "id": "./index.html",
+  "scope": "./"
+}

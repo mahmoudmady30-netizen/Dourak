@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="دورك">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0B7A68"/><stop offset="1" stop-color="#063F39"/></linearGradient>
+ <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#E7C46A"/><stop offset="1" stop-color="#B78A35"/></linearGradient>
+</defs>
+<rect x="8" y="8" width="240" height="240" rx="60" fill="url(#bg)"/>
+<path d="M70 66h58c36 0 63 26 63 61s-27 61-63 61H91v-31h35c18 0 31-12 31-30s-13-30-31-30H70z" fill="#fff"/>
+<circle cx="82" cy="188" r="13" fill="url(#gold)"/>
+<circle cx="185" cy="70" r="7" fill="#fff" opacity=".35"/>
+</svg>

@@ -1,0 +1,711 @@
+rules_version = '2';
+
+// DOURAK — Firestore security rules (V107 security hardening).
+// Every trust decision lives here: the app has no server, so anything the
+// app enforces on the device alone can be skipped by a modified client.
+// See SECURITY_AUDIT.md for the reasoning behind each section.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------- helpers
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function permanentAuth() {
+      return signedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function self(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function bizPath(businessId) {
+      return /databases/$(database)/documents/businesses/$(businessId);
+    }
+
+    function ownerOf(businessId) {
+      return signedIn() &&
+        get(bizPath(businessId)).data.get('ownerId', '') == request.auth.uid;
+    }
+
+    // Admins are granted ONLY from the Firebase Console, by creating
+    // admins/{uid}. No client can write that collection. (Previously the
+    // role was read from users/{uid}.role, which every user could set on
+    // their own document.)
+    function isAdmin() {
+      return permanentAuth() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Staff membership is a session document that the rules themselves
+    // verified against the owner-only passcode (see staffSessions below).
+    // Previously it was a self-written map on users/{uid}, trusted as-is.
+    function isStaffOf(businessId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/businesses/$(businessId)/staffSessions/$(request.auth.uid));
+    }
+
+    function myStaffId(businessId) {
+      return get(/databases/$(database)/documents/businesses/$(businessId)/staffSessions/$(request.auth.uid)).data.staffId;
+    }
+
+    function manages(businessId) {
+      return isAdmin() || ownerOf(businessId) || isStaffOf(businessId);
+    }
+
+    // Staff membership alone is not an authorization grant. The owner
+    // assigns explicit capabilities on businesses/{businessId}/staff/{staffId}.
+    // Owners/admins retain full access. This makes the same authorization
+    // boundary apply to direct Firestore calls, not only the UI.
+    function staffPerm(businessId, permission) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/businesses/$(businessId)/staffSessions/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/businesses/$(businessId)/staff/$(get(/databases/$(database)/documents/businesses/$(businessId)/staffSessions/$(request.auth.uid)).data.staffId)).data.get('active', true) != false &&
+        get(/databases/$(database)/documents/businesses/$(businessId)/staff/$(get(/databases/$(database)/documents/businesses/$(businessId)/staffSessions/$(request.auth.uid)).data.staffId)).data.get('permissions', {}).get(permission, false) == true;
+    }
+
+    function canQueue(businessId) {
+      return isAdmin() || ownerOf(businessId) || staffPerm(businessId, 'queue');
+    }
+
+    function canServices(businessId) {
+      return isAdmin() || ownerOf(businessId) || staffPerm(businessId, 'services');
+    }
+
+    function canStaff(businessId) {
+      return isAdmin() || ownerOf(businessId) || staffPerm(businessId, 'staff');
+    }
+
+    function canAnalytics(businessId) {
+      return isAdmin() || ownerOf(businessId) || staffPerm(businessId, 'analytics');
+    }
+
+    function canSettings(businessId) {
+      return isAdmin() || ownerOf(businessId) || staffPerm(businessId, 'settings');
+    }
+
+    function shortString(v, maxLen) {
+      return v is string && v.size() <= maxLen;
+    }
+
+    function validBusinessCode(code) {
+      return code is string && code.matches('^DRK-[A-Z0-9]{7}$');
+    }
+
+    function ticketPath(businessId, ticketId) {
+      return /databases/$(database)/documents/businesses/$(businessId)/queueTickets/$(ticketId);
+    }
+
+    // The status a customer's new ticket must start in is set by the
+    // owner's confirmation mode — not chosen by the customer's device.
+    function confirmationMode(businessId) {
+      return get(bizPath(businessId)).data.get('confirmationMode', 'auto');
+    }
+
+    function queueStatusOk(businessId, status) {
+      return (confirmationMode(businessId) == 'approval' && status == 'pending_approval') ||
+        (confirmationMode(businessId) == 'otp' && status == 'pending_otp') ||
+        (!(confirmationMode(businessId) in ['approval', 'otp']) && status == 'waiting');
+    }
+
+    function appointmentStatusOk(businessId, status) {
+      return (confirmationMode(businessId) == 'approval' && status == 'pending_approval') ||
+        (confirmationMode(businessId) == 'otp' && status == 'pending_otp') ||
+        (!(confirmationMode(businessId) in ['approval', 'otp']) && status == 'scheduled');
+    }
+
+    function underCapacity(businessId) {
+      return !(get(bizPath(businessId)).data.get('maxQueueCapacity', 0) is number) ||
+        get(bizPath(businessId)).data.get('maxQueueCapacity', 0) <= 0 ||
+        getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.waitingCount <=
+          get(bizPath(businessId)).data.get('maxQueueCapacity', 0);
+    }
+
+    function validImageDataUrl(v) {
+      return v is string && v.size() < 400000 && v.matches('^data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+$');
+    }
+
+    function validBusinessCreate() {
+      return signedIn() &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.active == true &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 120;
+    }
+
+    // --------------------------------------------------------------- admins
+
+    match /admins/{uid} {
+      // Managed from the Firebase Console only.
+      allow read: if self(uid);
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------- users
+
+    match /users/{uid} {
+      allow create: if self(uid) &&
+        request.resource.data.keys().hasOnly(['role','email','name','createdAt','updatedAt','lastSeenAt','location','governorate','phone','staffOf','accountPasswordSet','authProvider','emailVerified','lastDourakRole']) &&
+        (!('role' in request.resource.data) || request.resource.data.role == 'customer') &&
+        (!('authProvider' in request.resource.data) || request.resource.data.authProvider is string) &&
+        (!('emailVerified' in request.resource.data) || request.resource.data.emailVerified is bool) &&
+        (!('accountPasswordSet' in request.resource.data) || request.resource.data.accountPasswordSet is bool) &&
+        (!('lastDourakRole' in request.resource.data) || request.resource.data.lastDourakRole in ['customer','owner','staff','admin']);
+      allow read: if self(uid) || isAdmin();
+      allow update: if self(uid) &&
+        // accountPasswordHash is retired: it used to sit here readable by
+        // self(uid), which meant self(uid) could also overwrite it with no
+        // proof of the old value — a "confirm sensitive actions" password
+        // that its own holder could silently reset. The real hash now lives
+        // at users/{uid}/security/account, which is never client-readable.
+        // This field may only be removed going forward (a one-time cleanup
+        // of any pre-existing value), never set to a new value here.
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['email','name','updatedAt','role','lastSeenAt','location','governorate','phone','staffOf','accountPasswordHash','accountPasswordSet','authProvider','emailVerified','lastDourakRole']) &&
+        !('accountPasswordHash' in request.resource.data) &&
+        (!('accountPasswordSet' in request.resource.data) || request.resource.data.accountPasswordSet is bool) &&
+        // "role" is no longer an authority for anything; it may only be
+        // 'customer' or left as it already was.
+        (!('role' in request.resource.data.diff(resource.data).affectedKeys()) || request.resource.data.role == 'customer') &&
+        (!('authProvider' in request.resource.data) || request.resource.data.authProvider is string) &&
+        (!('emailVerified' in request.resource.data) || request.resource.data.emailVerified is bool) &&
+        (!('lastDourakRole' in request.resource.data) || request.resource.data.lastDourakRole in ['customer','owner','staff','admin']);
+      allow delete: if false;
+
+      // The real confirmation-password hash: never readable by anyone,
+      // including its own owner. A change (or the first-ever set) always
+      // goes through security/changeAttempt below, so the rules — not the
+      // client — are what decide whether a claimed "old password" was
+      // actually correct.
+      match /security/account {
+        allow read: if false;
+        allow create: if self(uid) &&
+          request.resource.data.keys().hasOnly(['passwordHash','updatedAt']) &&
+          request.resource.data.passwordHash is string && request.resource.data.passwordHash.size() == 64;
+        allow update: if self(uid) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['passwordHash','updatedAt']) &&
+          (!('passwordHash' in request.resource.data.diff(resource.data).affectedKeys()) ||
+            (request.resource.data.passwordHash is string && request.resource.data.passwordHash.size() == 64)) &&
+          // Proof of the current password: a prior write to changeAttempt
+          // must carry a guess matching the hash as it stands right now.
+          // Since this collection is unreadable, a client can never simply
+          // read the real hash back and replay it — the only way to satisfy
+          // this is to have actually hashed the correct plaintext password.
+          get(/databases/$(database)/documents/users/$(uid)/security/changeAttempt).data.guess == resource.data.passwordHash;
+        allow delete: if false;
+      }
+      match /security/changeAttempt {
+        allow read: if false;
+        allow create, update: if self(uid) &&
+          request.resource.data.keys().hasOnly(['guess','createdAt']) &&
+          request.resource.data.guess is string && request.resource.data.guess.size() == 64;
+        allow delete: if false;
+      }
+    }
+
+    // -------------------------------------------------------- business codes
+
+    // One document per code, created once, pointing at the business that
+    // owns it. A business may only carry a code that points back at it,
+    // so one owner can no longer copy another place's code.
+    match /businessCodes/{code} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if signedIn() && validBusinessCode(code) &&
+        request.resource.data.keys().hasOnly(['businessId','createdAt']) &&
+        getAfter(bizPath(request.resource.data.businessId)).data.get('ownerId', '') == request.auth.uid &&
+        getAfter(bizPath(request.resource.data.businessId)).data.get('businessCode', '') == code;
+      allow update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------ businesses
+
+    match /businesses/{businessId} {
+      allow read: if resource.data.active == true || ownerOf(businessId) || isStaffOf(businessId) || isAdmin();
+      allow create: if isAdmin() || (validBusinessCreate() && permanentAuth() &&
+        request.resource.data.keys().hasOnly([
+          'ownerId','name','type','address','governorate','location','phone','whatsapp','hours','openingTime','closingTime','logoDataUrl','gallery','gracePeriod','active','setupMode','confirmationMode','appointmentGapMinutes','tokenWhatsappTemplate','maxQueueCapacity','queuePaused','lastTokenTime','voicePackUpdatedAt','is24Hours','displayPromotion','displayTheme','displayLayout','displayMedia','displayLayouts','accountId','accountName','branchType','parentBusinessId','businessCode','displayZoom','createdAt','updatedAt'
+        ]) &&
+        (!('logoDataUrl' in request.resource.data) || validImageDataUrl(request.resource.data.logoDataUrl)) &&
+        (!('gallery' in request.resource.data) || (request.resource.data.gallery is list && request.resource.data.gallery.size() <= 5)) &&
+        (!('businessCode' in request.resource.data) ||
+          (validBusinessCode(request.resource.data.businessCode) &&
+           getAfter(/databases/$(database)/documents/businessCodes/$(request.resource.data.businessCode)).data.businessId == businessId)));
+      allow update: if canSettings(businessId) &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name','type','address','governorate','location','phone','whatsapp','hours','openingTime','closingTime','logoDataUrl','gallery','gracePeriod','active','setupMode','confirmationMode','appointmentGapMinutes','tokenWhatsappTemplate','maxQueueCapacity','queuePaused','lastTokenTime','voicePackUpdatedAt','is24Hours','displayPromotion','displayTheme','displayLayout','displayMedia','displayLayouts','accountId','accountName','branchType','parentBusinessId','businessCode','displayZoom','updatedAt'
+        ]) &&
+        (!('logoDataUrl' in request.resource.data.diff(resource.data).affectedKeys()) || validImageDataUrl(request.resource.data.logoDataUrl)) &&
+        (!('gallery' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.gallery is list && request.resource.data.gallery.size() <= 5)) &&
+        // The code is set once and never changed afterwards.
+        (!('businessCode' in request.resource.data.diff(resource.data).affectedKeys()) ||
+          (!('businessCode' in resource.data) &&
+           validBusinessCode(request.resource.data.businessCode) &&
+           getAfter(/databases/$(database)/documents/businessCodes/$(request.resource.data.businessCode)).data.businessId == businessId)));
+      allow delete: if isAdmin() || ownerOf(businessId);
+
+      match /members/{uid} {
+        allow read: if isAdmin() || (signedIn() && (request.auth.uid == uid || ownerOf(businessId)));
+        allow create: if isAdmin() || (ownerOf(businessId) && request.resource.data.keys().hasOnly(['uid','role','branchIds','permissions','active','createdAt','updatedAt','email']) && request.resource.data.uid == uid);
+        allow update: if isAdmin() || (ownerOf(businessId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role','branchIds','permissions','active','updatedAt','email']));
+        allow delete: if isAdmin() || ownerOf(businessId);
+      }
+
+      // A TV/kiosk device pairs itself by creating its own pending request
+      // (self-write, using its own anonymous uid as the doc id), then waits.
+      // Only the real owner — verified by their own normal login, never the
+      // device itself — can flip it to approved. The device can never
+      // approve its own request, and can't read anyone else's.
+      match /displayDevices/{deviceUid} {
+        allow read: if self(deviceUid) || ownerOf(businessId) || isAdmin();
+        allow create: if self(deviceUid) &&
+          request.resource.data.keys().hasOnly(['status','requestedAt']) &&
+          request.resource.data.status == 'pending';
+        allow update: if (isAdmin() || ownerOf(businessId)) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','approvedAt']) &&
+          request.resource.data.status in ['approved', 'revoked'];
+        allow delete: if isAdmin() || ownerOf(businessId) || self(deviceUid);
+      }
+
+      match /customerStats/{uid} {
+        allow read: if self(uid) || canAnalytics(businessId);
+        allow create: if self(uid) &&
+          request.resource.data.keys().hasOnly(['cancels','windowStart','lastCancelledTicketId']) &&
+          request.resource.data.cancels == 1 &&
+          request.resource.data.windowStart == request.time &&
+          request.resource.data.lastCancelledTicketId is string;
+        allow update: if isAdmin() || ownerOf(businessId) || (self(uid) &&
+          request.resource.data.keys().hasOnly(['cancels','windowStart','lastCancelledTicketId']) &&
+          request.resource.data.lastCancelledTicketId is string &&
+          request.resource.data.lastCancelledTicketId != resource.data.lastCancelledTicketId &&
+          ((request.time <= resource.data.windowStart + duration.value(24, 'h') &&
+             request.resource.data.windowStart == resource.data.windowStart &&
+             request.resource.data.cancels == resource.data.cancels + 1) ||
+           (request.time > resource.data.windowStart + duration.value(24, 'h') &&
+             request.resource.data.windowStart == request.time &&
+             request.resource.data.cancels == 1)));
+        allow delete: if isAdmin() || ownerOf(businessId);
+      }
+
+      match /otpSecrets/{ticketId} {
+        allow read, delete: if canQueue(businessId);
+        allow create, update: if canQueue(businessId) &&
+          request.resource.data.keys().hasOnly(['code','createdAt']) &&
+          request.resource.data.code is string && request.resource.data.code.size() == 6;
+      }
+
+      match /ticketContacts/{ticketId} {
+        allow read: if canQueue(businessId) ||
+          (signedIn() && resource.data.customerId == request.auth.uid);
+        allow create: if request.resource.data.keys().hasOnly(['customerId','customerName','customerPhone','createdAt']) &&
+          shortString(request.resource.data.get('customerName', ''), 120) &&
+          shortString(request.resource.data.get('customerPhone', ''), 40) &&
+          (canQueue(businessId) ||
+            (signedIn() && request.resource.data.customerId == request.auth.uid &&
+              getAfter(ticketPath(businessId, ticketId)).data.customerId == request.auth.uid));
+        allow update: if canQueue(businessId) &&
+          request.resource.data.keys().hasOnly(['customerId','customerName','customerPhone','createdAt']);
+        allow delete: if isAdmin() || ownerOf(businessId);
+      }
+
+      match /voicePack/{clipId} {
+        allow read: if signedIn();
+        allow create, update: if isAdmin() || (ownerOf(businessId) &&
+          request.resource.data.keys().hasOnly(['lang','key','dataUrl','durationMs','updatedAt']) &&
+          request.resource.data.lang in ['ar','en'] &&
+          request.resource.data.dataUrl is string &&
+          request.resource.data.dataUrl.size() < 350000);
+        allow delete: if isAdmin() || ownerOf(businessId);
+      }
+
+      match /services/{serviceId} {
+        allow read: if resource.data.active == true || canServices(businessId);
+        allow create: if canServices(businessId) &&
+          request.resource.data.keys().hasOnly(['name','duration','price','discountPrice','active','createdAt','updatedAt']);
+        allow update: if canServices(businessId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','duration','price','discountPrice','active','updatedAt']);
+        allow delete: if canServices(businessId);
+      }
+
+      // ---------------------------------------------------------- staff
+
+      // Public staff directory — never holds the passcode any more.
+      match /staff/{staffId} {
+        allow read: if canStaff(businessId) || (isStaffOf(businessId) && myStaffId(businessId) == staffId);
+        allow create: if canStaff(businessId) &&
+          request.resource.data.keys().hasOnly(['name','role','active','permissions','username','createdAt','updatedAt']);
+        allow update: if canStaff(businessId) &&
+          !('passcode' in request.resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','role','active','permissions','username','passcode','online','updatedAt']) || (
+          isStaffOf(businessId) &&
+          myStaffId(businessId) == staffId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['online','lastLoginAt','lastLogoutAt','updatedAt'])
+        );
+        allow delete: if canStaff(businessId);
+      }
+
+      // The passcode itself: readable by nobody except the owner.
+      match /staffSecrets/{staffId} {
+        // Never expose passcode material to any browser. Staff authentication
+        // is verified server-side by the App-Check-protected loginStaff
+        // callable. Owners/admins can replace/delete a credential, but never
+        // read it back.
+        allow read: if false;
+        allow delete: if isAdmin() || ownerOf(businessId);
+        allow create, update: if (isAdmin() || ownerOf(businessId) ||
+            (isStaffOf(businessId) && myStaffId(businessId) == staffId)) &&
+          request.resource.data.keys().hasOnly(['algorithm','iterations','salt','hash','passcodeHash','updatedAt']) &&
+          ((request.resource.data.get('algorithm','') == 'PBKDF2-SHA256' &&
+            request.resource.data.iterations is int && request.resource.data.iterations >= 200000 && request.resource.data.iterations <= 1000000 &&
+            request.resource.data.salt is string && request.resource.data.salt.size() >= 16 &&
+            request.resource.data.hash is string && request.resource.data.hash.matches('^[0-9a-f]{64}$')) ||
+           (request.resource.data.get('algorithm','') == '' && request.resource.data.passcodeHash is string &&
+            request.resource.data.passcodeHash.matches('^[0-9a-f]{64}$')));
+      }
+
+      // Login attempts, limited to 8 per staff member per 15 minutes. The
+      // attempt is written first (always succeeds while under the limit),
+      // then the session is created only if that attempt matches the
+      // passcode — so wrong guesses are counted, not free.
+      match /staffAuth/{staffId} {
+        // Authentication attempts are maintained only by the trusted
+        // App-Check-protected Cloud Function. Clients cannot write guesses or
+        // manipulate lockout counters.
+        allow read, write: if false;
+      }
+
+      match /staffSessions/{uid} {
+        allow read: if self(uid) || isAdmin() || ownerOf(businessId);
+        // Created by the trusted loginStaff callable only. Direct client
+        // creation would allow self-asserted staff membership.
+        allow create: if false;
+        allow update: if false;
+        allow delete: if self(uid) || isAdmin() || ownerOf(businessId);
+      }
+
+      match /staffCheckins/{checkinId} {
+        allow read: if canStaff(businessId) || canAnalytics(businessId);
+        allow create: if staffPerm(businessId, 'queue') &&
+          request.resource.data.staffId == myStaffId(businessId) &&
+          request.resource.data.keys().hasOnly(['staffId','staffName','loginAt']);
+        allow update, delete: if isAdmin() || ownerOf(businessId);
+      }
+
+
+      // Immutable server-written audit trail. Clients cannot forge or edit
+      // audit records; the trusted Cloud Function writes them with Admin SDK.
+      match /auditLogs/{logId} {
+        allow read: if isAdmin() || ownerOf(businessId) || canAnalytics(businessId);
+        allow create, update, delete: if false;
+      }
+
+      // -------------------------------------------------------- ratings
+
+      match /ratings/{customerUid} {
+        allow read: if canAnalytics(businessId) || (signedIn() && request.auth.uid == customerUid);
+        allow create: if signedIn() && request.auth.uid == customerUid &&
+          request.resource.data.customerId == request.auth.uid &&
+          request.resource.data.businessId == businessId &&
+          request.resource.data.keys().hasOnly(['customerId','businessId','ticketId','rating','feedback','createdAt']) &&
+          request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5 &&
+          shortString(request.resource.data.get('feedback', ''), 1000) &&
+          get(ticketPath(businessId, request.resource.data.ticketId)).data.customerId == request.auth.uid &&
+          get(ticketPath(businessId, request.resource.data.ticketId)).data.status == 'served';
+        allow update: if isAdmin() ||
+          ((canAnalytics(businessId)) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reply','replyByName','repliedAt','feedback']) &&
+            shortString(request.resource.data.get('reply', ''), 1000)) ||
+          (signedIn() && request.auth.uid == customerUid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating','feedback']) &&
+            request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5 &&
+            shortString(request.resource.data.get('feedback', ''), 1000));
+        allow delete: if isAdmin() || (signedIn() && request.auth.uid == customerUid);
+      }
+
+      // ---------------------------------------------------------- queue
+
+      // Every change a customer makes to the counters must be tied to a
+      // real ticket of theirs written in the same transaction — the
+      // counters can no longer be moved on their own.
+      match /queue/{docId} {
+        allow read: if (docId == 'current' && resource.data.keys().hasOnly(['waitingCount','waitingWorkMinutes','currentNumber','nextNumber','servedCount','updatedAt','lastIssuedTicketId','lastCancelledTicketId','lastActivatedTicketId'])) || canQueue(businessId);
+
+        allow create: if isAdmin() || ownerOf(businessId) || (docId == 'current' && signedIn() &&
+          request.resource.data.get('lastIssuedTicketId', '') is string &&
+          request.resource.data.get('lastIssuedTicketId', '') != '' &&
+          !exists(ticketPath(businessId, request.resource.data.lastIssuedTicketId)) &&
+          getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.customerId == request.auth.uid && (
+          (request.resource.data.nextNumber == 2 &&
+            request.resource.data.currentNumber == 0 &&
+            request.resource.data.waitingCount == 1 &&
+            request.resource.data.servedCount == 0 &&
+            request.resource.data.get('waitingWorkMinutes', 0) == getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.get('duration', 30)) ||
+          (request.resource.data.get('nextAppointmentNumber', 0) == 2 &&
+            request.resource.data.get('nextNumber', 1) == 1 &&
+            request.resource.data.get('currentNumber', 0) == 0 &&
+            request.resource.data.get('waitingCount', 0) == 0 &&
+            request.resource.data.get('servedCount', 0) == 0)
+        ));
+
+        allow update: if (
+          // Customer joins the live queue.
+          signedIn() && docId == 'current' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nextNumber','waitingCount','waitingWorkMinutes','updatedAt','lastIssuedTicketId']) &&
+          request.resource.data.nextNumber == resource.data.nextNumber + 1 &&
+          request.resource.data.waitingCount == resource.data.waitingCount + 1 &&
+          request.resource.data.waitingWorkMinutes == resource.data.get('waitingWorkMinutes', 0) + getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.get('duration', 30) &&
+          !exists(ticketPath(businessId, request.resource.data.lastIssuedTicketId)) &&
+          getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.customerId == request.auth.uid &&
+          getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.number == resource.data.nextNumber
+        ) || (
+          // Customer books a timed appointment.
+          signedIn() && docId == 'current' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nextAppointmentNumber','updatedAt','lastIssuedTicketId']) &&
+          request.resource.data.nextAppointmentNumber == resource.data.get('nextAppointmentNumber', 1) + 1 &&
+          !exists(ticketPath(businessId, request.resource.data.lastIssuedTicketId)) &&
+          getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.customerId == request.auth.uid &&
+          getAfter(ticketPath(businessId, request.resource.data.lastIssuedTicketId)).data.get('type', '') == 'appointment'
+        ) || (
+          // Customer cancels their own ticket that was still counted.
+          signedIn() && docId == 'current' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['waitingCount','waitingWorkMinutes','lastCancelledTicketId','updatedAt']) &&
+          request.resource.data.waitingCount == resource.data.waitingCount - 1 &&
+          request.resource.data.waitingWorkMinutes == resource.data.get('waitingWorkMinutes', 0) - get(ticketPath(businessId, request.resource.data.lastCancelledTicketId)).data.get('duration', 30) &&
+          get(ticketPath(businessId, request.resource.data.lastCancelledTicketId)).data.customerId == request.auth.uid &&
+          get(ticketPath(businessId, request.resource.data.lastCancelledTicketId)).data.status != 'cancelled' &&
+          getAfter(ticketPath(businessId, request.resource.data.lastCancelledTicketId)).data.status == 'cancelled'
+        ) || (
+          // Customer's own appointment becomes a live queue entry.
+          signedIn() && docId == 'current' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['waitingCount','waitingWorkMinutes','updatedAt','lastActivatedTicketId']) &&
+          request.resource.data.waitingCount == resource.data.waitingCount + 1 &&
+          request.resource.data.waitingWorkMinutes == resource.data.get('waitingWorkMinutes', 0) + get(ticketPath(businessId, request.resource.data.lastActivatedTicketId)).data.get('duration', 30) &&
+          get(ticketPath(businessId, request.resource.data.lastActivatedTicketId)).data.customerId == request.auth.uid &&
+          get(ticketPath(businessId, request.resource.data.lastActivatedTicketId)).data.status == 'scheduled' &&
+          getAfter(ticketPath(businessId, request.resource.data.lastActivatedTicketId)).data.status == 'waiting'
+        ) || canQueue(businessId);
+
+        allow delete: if isAdmin();
+      }
+
+      match /queueTickets/{ticketId} {
+        allow read: if (signedIn() && resource.data.customerId == request.auth.uid) || canQueue(businessId) || canAnalytics(businessId);
+
+        allow create: if permanentAuth() &&
+          request.resource.data.keys().hasOnly([
+            'customerId','serviceId','number','status','businessId','createdAt','businessName','serviceName','duration','price','walkIn','type','appointmentAt','estimatedWaitAtJoin'
+          ]) &&
+          request.resource.data.customerId == request.auth.uid &&
+          request.resource.data.businessId == businessId &&
+          request.resource.data.number is int && request.resource.data.number > 0 &&
+          shortString(request.resource.data.get('serviceName', ''), 120) &&
+          shortString(request.resource.data.get('businessName', ''), 160) &&
+          // Owner/staff walk-ins are exempt from the customer-only checks.
+          (canQueue(businessId) || (
+            request.resource.data.get('walkIn', false) != true &&
+            exists(/databases/$(database)/documents/businesses/$(businessId)/services/$(request.resource.data.serviceId)) &&
+            get(/databases/$(database)/documents/businesses/$(businessId)/services/$(request.resource.data.serviceId)).data.get('active', true) != false &&
+            request.resource.data.get('serviceName', '') == get(/databases/$(database)/documents/businesses/$(businessId)/services/$(request.resource.data.serviceId)).data.get('name', '') &&
+            request.resource.data.duration == get(/databases/$(database)/documents/businesses/$(businessId)/services/$(request.resource.data.serviceId)).data.get('duration', 30) &&
+            request.resource.data.price == get(/databases/$(database)/documents/businesses/$(businessId)/services/$(request.resource.data.serviceId)).data.get('price', 0) &&
+            request.resource.data.get('estimatedWaitAtJoin', 0) >= request.resource.data.duration &&
+            (!exists(/databases/$(database)/documents/businesses/$(businessId)/customerStats/$(request.auth.uid)) ||
+              get(/databases/$(database)/documents/businesses/$(businessId)/customerStats/$(request.auth.uid)).data.cancels < 3 ||
+              request.time > get(/databases/$(database)/documents/businesses/$(businessId)/customerStats/$(request.auth.uid)).data.windowStart + duration.value(24, 'h')) &&
+            ((request.resource.data.get('type', '') == 'appointment' &&
+                appointmentStatusOk(businessId, request.resource.data.status)) ||
+             (request.resource.data.get('type', '') != 'appointment' &&
+                get(bizPath(businessId)).data.get('queuePaused', false) != true &&
+                queueStatusOk(businessId, request.resource.data.status) &&
+                underCapacity(businessId)))
+          )) &&
+          (
+            (request.resource.data.get('type', '') == 'appointment' &&
+              request.resource.data.status in ['scheduled','pending_approval','pending_otp'] &&
+              request.resource.data.appointmentAt is int &&
+              (
+                (!exists(/databases/$(database)/documents/businesses/$(businessId)/queue/current) &&
+                  getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextAppointmentNumber == 2) ||
+                (exists(/databases/$(database)/documents/businesses/$(businessId)/queue/current) &&
+                  request.resource.data.number == getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextAppointmentNumber - 1 &&
+                  getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextAppointmentNumber ==
+                    get(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.get('nextAppointmentNumber', 1) + 1)
+              )
+            ) ||
+            (request.resource.data.get('type', '') != 'appointment' &&
+              request.resource.data.status in ['waiting','pending_approval','pending_otp'] &&
+              (
+                (!exists(/databases/$(database)/documents/businesses/$(businessId)/queue/current) &&
+                  getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextNumber == 2 &&
+                  getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.waitingCount == 1) ||
+                (exists(/databases/$(database)/documents/businesses/$(businessId)/queue/current) &&
+                  request.resource.data.number == getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextNumber - 1 &&
+                  getAfter(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextNumber ==
+                    get(/databases/$(database)/documents/businesses/$(businessId)/queue/current).data.nextNumber + 1)
+              )
+            )
+          );
+
+        allow update: if (
+          signedIn() &&
+          resource.data.customerId == request.auth.uid &&
+          request.resource.data.customerId == resource.data.customerId &&
+          request.resource.data.businessId == resource.data.businessId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','cancelledAt','cancellationReason']) &&
+          request.resource.data.status == 'cancelled' &&
+          shortString(request.resource.data.get('cancellationReason', ''), 300) &&
+          existsAfter(/databases/$(database)/documents/businesses/$(businessId)/customerStats/$(request.auth.uid)) &&
+          getAfter(/databases/$(database)/documents/businesses/$(businessId)/customerStats/$(request.auth.uid)).data.lastCancelledTicketId == ticketId
+        ) || (
+          signedIn() &&
+          resource.data.customerId == request.auth.uid &&
+          resource.data.status == 'pending_otp' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['otpAttempt','otpTries']) &&
+          request.resource.data.otpAttempt is string &&
+          request.resource.data.otpAttempt.size() == 6 &&
+          request.resource.data.otpTries == resource.data.get('otpTries', 0) + 1 &&
+          request.resource.data.otpTries <= 5
+        ) || (
+          signedIn() &&
+          resource.data.customerId == request.auth.uid &&
+          resource.data.status == 'pending_otp' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+          ((resource.data.get('type', '') == 'appointment' && request.resource.data.status == 'scheduled') ||
+           (resource.data.get('type', '') != 'appointment' && request.resource.data.status == 'waiting')) &&
+          exists(/databases/$(database)/documents/businesses/$(businessId)/otpSecrets/$(ticketId)) &&
+          resource.data.get('otpAttempt', '') == get(/databases/$(database)/documents/businesses/$(businessId)/otpSecrets/$(ticketId)).data.code
+        ) || (
+          signedIn() &&
+          resource.data.customerId == request.auth.uid &&
+          resource.data.status == 'scheduled' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+          request.resource.data.status == 'waiting' &&
+          resource.data.appointmentAt is int &&
+          request.time >= timestamp.value(resource.data.appointmentAt) - duration.value(15, 'm')
+        ) || canQueue(businessId);
+        allow delete: if isAdmin() || ownerOf(businessId);
+      }
+    }
+
+    // --------------------------------------------------------------- bookings
+
+    match /bookings/{bookingId} {
+      allow create: if isAdmin() || (signedIn() &&
+        request.resource.data.customerId == request.auth.uid &&
+        request.resource.data.keys().hasOnly([
+          'customerId','businessId','serviceId','ticketId','number','status','createdAt','businessName','serviceName','type'
+        ]) &&
+        request.resource.data.ticketId == bookingId &&
+        request.resource.data.status == 'waiting' &&
+        getAfter(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.customerId == request.auth.uid &&
+        request.resource.data.number == getAfter(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.number &&
+        request.resource.data.get('serviceName', '') == getAfter(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.get('serviceName', '') &&
+        request.resource.data.get('businessName', '') == getAfter(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.get('businessName', '') &&
+        ((getAfter(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.get('type', '') == 'appointment' &&
+            request.resource.data.get('type', '') == 'appointment') ||
+         (getAfter(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.get('type', '') != 'appointment' &&
+            request.resource.data.get('type', '') == 'queue')));
+
+      // Who booked where and when is private: the customer, and the
+      // business it belongs to.
+      allow read: if signedIn() && (
+        resource.data.customerId == request.auth.uid ||
+        canQueue(resource.data.businessId));
+
+      allow update: if (
+        signedIn() &&
+        resource.data.customerId == request.auth.uid &&
+        request.resource.data.customerId == resource.data.customerId &&
+        request.resource.data.businessId == resource.data.businessId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','cancelledAt','cancellationReason'])
+      ) || canQueue(resource.data.businessId);
+      allow delete: if isAdmin() || (signedIn() && ownerOf(resource.data.businessId));
+    }
+
+    match /connectionTests/{testId} {
+      allow create, update: if signedIn() && request.resource.data.uid == request.auth.uid &&
+        request.resource.data.keys().size() <= 6;
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow delete: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+    }
+
+    // Username -> business/staff lookup for the staff login screen. Holds
+    // no passcode any more (that lives in staffSecrets, owner-only).
+    match /staffLogins/{username} {
+      allow get: if signedIn();
+      allow list: if isAdmin() || (signedIn() && ownerOf(resource.data.businessId));
+      allow create: if isAdmin() || (signedIn() && ownerOf(request.resource.data.businessId) &&
+        request.resource.data.keys().hasOnly(['businessId','staffId','name']));
+      allow update: if isAdmin() || (signedIn() && ownerOf(resource.data.businessId) &&
+        !('passcode' in request.resource.data) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['passcode','name']));
+      allow delete: if isAdmin() || (signedIn() && ownerOf(resource.data.businessId));
+    }
+
+    // ---------------------------------------------------------- conversations
+
+    match /conversations/{conversationId} {
+      allow read: if isAdmin() || (signedIn() &&
+        (resource.data.customerId == request.auth.uid || ownerOf(resource.data.businessId)));
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly(['customerId','businessId','ticketId','lastMessage','updatedAt','read']) &&
+        shortString(request.resource.data.get('lastMessage', ''), 1000) &&
+        (request.resource.data.customerId == request.auth.uid || ownerOf(request.resource.data.businessId));
+      allow update: if signedIn() &&
+        (resource.data.customerId == request.auth.uid || ownerOf(resource.data.businessId)) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage','updatedAt','read']) &&
+        shortString(request.resource.data.get('lastMessage', ''), 1000);
+      allow delete: if isAdmin() || ownerOf(resource.data.businessId);
+
+      match /messages/{messageId} {
+        allow read: if signedIn() && (
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.customerId == request.auth.uid ||
+          ownerOf(get(/databases/$(database)/documents/conversations/$(conversationId)).data.businessId)
+        );
+        // The sender role must match who is actually sending.
+        allow create: if signedIn() &&
+          request.resource.data.senderId == request.auth.uid &&
+          shortString(request.resource.data.get('text', ''), 1000) &&
+          (
+            (request.resource.data.senderRole == 'customer' &&
+              getAfter(/databases/$(database)/documents/conversations/$(conversationId)).data.customerId == request.auth.uid) ||
+            (request.resource.data.senderRole == 'owner' &&
+              ownerOf(getAfter(/databases/$(database)/documents/conversations/$(conversationId)).data.businessId))
+          );
+        allow update: if false;
+        allow delete: if isAdmin() || ownerOf(get(/databases/$(database)/documents/conversations/$(conversationId)).data.businessId);
+      }
+    }
+
+    // ---------------------------------------------------------- notifications
+
+    match /users/{uid}/notifications/{notificationId} {
+      allow read: if self(uid);
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly(['type','businessId','ticketId','title','body','read','createdAt']) &&
+        request.resource.data.read == false &&
+        shortString(request.resource.data.get('type', ''), 60) &&
+        shortString(request.resource.data.get('title', ''), 200) &&
+        shortString(request.resource.data.get('body', ''), 1000) &&
+        shortString(request.resource.data.get('ticketId', ''), 128) &&
+        request.resource.data.businessId is string && request.resource.data.businessId.size() > 0 &&
+        (self(uid) ||
+          ownerOf(request.resource.data.businessId) ||
+          isStaffOf(request.resource.data.businessId) ||
+          (get(bizPath(request.resource.data.businessId)).data.get('ownerId', '') == uid &&
+            request.resource.data.get('ticketId', '') != '' &&
+            get(ticketPath(request.resource.data.businessId, request.resource.data.ticketId)).data.customerId == request.auth.uid));
+      allow update: if self(uid) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
