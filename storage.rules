@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// DOURAK — Firebase Storage rules.
+//
+// The app does not use Firebase Storage today: every image (business logo,
+// gallery, TV display media, voice clips) is stored as a base64 data URL
+// directly inside Firestore documents (see firestore.rules' validImageDataUrl
+// and the voicePack size cap). This file exists anyway because the project's
+// Storage bucket IS provisioned (storageBucket is set in the client's Firebase
+// config), and a bucket with no rules file ever deployed via the CLI can be
+// running whatever was last set by hand in the console — possibly still the
+// permissive defaults from initial project setup. Deploy this explicitly so
+// the bucket's actual behavior lives in source control, not console history.
+//
+// If Storage is ever adopted later (e.g. to stop embedding large base64
+// blobs in Firestore documents), replace the relevant match block with real
+// ownership/size/MIME-type rules — mirroring the same pattern firestore.rules
+// already uses (ownerOf(businessId) checks, explicit field/size validation)
+// — and add it to the same emulator test suite that covers firestore.rules.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

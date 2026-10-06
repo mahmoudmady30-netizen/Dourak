@@ -1,0 +1,66 @@
+import pathlib, json
+from playwright.sync_api import sync_playwright
+ROOT = pathlib.Path(__file__).resolve().parent; APP_URL = ROOT.parent.joinpath('index.html').as_uri()
+MOCK = ROOT.joinpath('mock_firestore.js').read_text(encoding='utf-8')
+res = []
+def check(name, ok, detail=''): res.append(ok); print(('PASS ' if ok else 'FAIL ') + name + (f'  [{detail}]' if detail else ''))
+with sync_playwright() as p:
+    b = p.chromium.launch(); pg = b.new_page()
+    pg.add_init_script("localStorage.setItem('dourakBusinessId','b1'); localStorage.setItem('tbSetup', JSON.stringify({businessId:'b1',name:'صالون الأمير'})); localStorage.setItem('tbCustomerProfile', JSON.stringify({name:'محمود مدي',governorate:'دبي',phone:'0501234567'}));")
+    pg.goto(APP_URL); pg.wait_for_timeout(700); pg.evaluate("document.getElementById('splash')?.remove()")
+    pg.evaluate(MOCK)
+    ev = lambda js: pg.evaluate("(async()=>{" + js + "})()")
+    as_ = lambda uid: ev(f"window.__who.uid='{uid}'")
+    toast = lambda: pg.evaluate("document.getElementById('toast')?.textContent||''")
+    T = "window.dourakFB.db.collection('businesses').doc('b1').collection('queueTickets').doc('t1')"
+    ev("__db['businesses/b1/queueTickets/t1']={customerId:'cust1',businessId:'b1',status:'pending_otp',number:7,type:'queue'}; __db['businesses/b1/ticketContacts/t1']={customerId:'cust1',customerName:'محمود',customerPhone:'971501234567'}; const i=document.createElement('input'); i.id='otpInput_t1'; document.body.appendChild(i);")
+    # --- OTP ---
+    as_('cust1')
+    r = ev(f"try{{ await {T}.update({{status:'waiting'}}); return 'ALLOWED'; }}catch(e){{ return e.code; }}")
+    check('ATTACK: customer flips pending_otp -> waiting directly', r == 'permission-denied', r)
+    as_('own1'); ev("await sendOtpToCustomer('t1')")
+    code = pg.evaluate("__db['businesses/b1/otpSecrets/t1']?.code || ''")
+    check('owner creates a 6-digit secret code', len(code) == 6 and code.isdigit(), code)
+    check('owner sees the code in the send sheet', code in pg.evaluate("document.getElementById('sheet').textContent"))
+    check('ticket itself carries NO code', 'otpCode' not in pg.evaluate("__db['businesses/b1/queueTickets/t1']"))
+    as_('cust1')
+    r = ev("try{ await window.dourakFB.db.collection('businesses').doc('b1').collection('otpSecrets').doc('t1').get(); return 'READ'; }catch(e){ return e.code; }")
+    check('ATTACK: customer reads the secret', r == 'permission-denied', r)
+    wrong = '000000' if code != '000000' else '111111'
+    for n in range(1, 6):
+        ev(f"document.getElementById('otpInput_t1').value='{wrong}'; await confirmOtpTicket('b1','t1')")
+    t = pg.evaluate("__db['businesses/b1/queueTickets/t1']")
+    check('5 wrong attempts: still pending, counter=5', t['status'] == 'pending_otp' and t.get('otpTries') == 5, f"status={t['status']} tries={t.get('otpTries')}")
+    ev(f"document.getElementById('otpInput_t1').value='{code}'; await confirmOtpTicket('b1','t1')")
+    check('6th attempt blocked even with the RIGHT code', pg.evaluate("__db['businesses/b1/queueTickets/t1'].status") == 'pending_otp', toast())
+    r = ev(f"try{{ await {T}.update({{otpTries:0}}); return 'ALLOWED'; }}catch(e){{ return e.code; }}")
+    check('ATTACK: customer resets the attempt counter', r == 'permission-denied', r)
+    as_('own1'); ev("await sendOtpToCustomer('t1')"); code2 = pg.evaluate("__db['businesses/b1/otpSecrets/t1'].code")
+    check('owner re-send after lockout issues a NEW code + resets counter', code2 != code and pg.evaluate("__db['businesses/b1/queueTickets/t1'].otpTries") == 0)
+    as_('cust1'); ev(f"document.getElementById('otpInput_t1').value='{code2}'; await confirmOtpTicket('b1','t1')")
+    check('correct code confirms the ticket', pg.evaluate("__db['businesses/b1/queueTickets/t1'].status") == 'waiting', toast())
+    as_('cust1'); ev("__db['businesses/b1/queueTickets/t3']={customerId:'cust1',businessId:'b1',status:'pending_otp',number:9,type:'queue'}; const i=document.createElement('input'); i.id='otpInput_t3'; i.value='\u0661\u0662\u0663\u0664\u0665\u0666'; document.body.appendChild(i);")
+    as_('own1'); ev("await window.dourakFB.db.collection('businesses').doc('b1').collection('otpSecrets').doc('t3').set({code:'123456',createdAt:1})")
+    as_('cust1'); ev("await confirmOtpTicket('b1','t3')")
+    check('code typed in Arabic digits (١٢٣٤٥٦) is accepted', pg.evaluate("__db['businesses/b1/queueTickets/t3'].status") == 'waiting')
+    # --- PII ---
+    ev("__db['businesses/b1']={name:'صالون الأمير',ownerId:'own1',active:true,confirmationMode:'otp',hours:'00:00 - 23:59'}; __db['businesses/b1/services/s1']={name:'قص شعر',duration:30,price:40,active:true};")
+    as_('cust1'); r = ev("try{ const x=await issueDourakTicket('b1','s1','قص شعر'); return JSON.stringify(x); }catch(e){ return 'ERR '+(e.code||e.message); }")
+    tid = json.loads(r)['id'] if r.startswith('{') else None
+    tk = pg.evaluate(f"__db['businesses/b1/queueTickets/{tid}']") if tid else {}
+    ct = pg.evaluate(f"__db['businesses/b1/ticketContacts/{tid}']") if tid else {}
+    check('customer joins (OTP mode) successfully', bool(tid), r[:90])
+    check('new public ticket has NO name/phone/code', bool(tid) and not ({'customerName','customerPhone','otpCode'} & set(tk or {})), str(sorted((tk or {}).keys())))
+    check('name/phone saved in private ticketContacts', bool(ct) and ct.get('customerName') == 'محمود مدي', str(ct))
+    r = ev("try{ await window.dourakFB.db.collection('businesses').doc('b1').collection('queueTickets').doc('x9').set({customerId:'cust1',businessId:'b1',status:'waiting',number:99,customerName:'x',customerPhone:'1'}); return 'ALLOWED'; }catch(e){ return e.code; }")
+    check('old-style ticket WITH name/phone is rejected', r == 'permission-denied', r)
+    as_('cust2'); r = ev("try{ await window.dourakFB.db.collection('businesses').doc('b1').collection('ticketContacts').doc('t1').get(); return 'READ'; }catch(e){ return e.code; }")
+    check("ATTACK: another customer reads someone's contact", r == 'permission-denied', r)
+    ev("__db['businesses/b1/queueTickets/t2']={customerId:'cust9',businessId:'b1',status:'waiting',number:8,customerName:'سارة',customerPhone:'971509999999',otpCode:'4321'}")
+    as_('own1'); ev("await dourakEnsureContacts('b1',[{id:'t2',...__db['businesses/b1/queueTickets/t2']}])")
+    t2 = pg.evaluate("__db['businesses/b1/queueTickets/t2']"); c2 = pg.evaluate("__db['businesses/b1/ticketContacts/t2']")
+    check('legacy ticket migrated: contact copied', bool(c2) and c2.get('customerName') == 'سارة' and c2.get('customerId') == 'cust9')
+    check('legacy ticket cleaned: name/phone/code removed', not ({'customerName','customerPhone','otpCode'} & set(t2)), str(sorted(t2)))
+    check('owner row shows the name again via enrichment', pg.evaluate("dourakWithContact({id:'t2'}).customerName") == 'سارة')
+    b.close()
+print(f"\nOTP/PII RESULTS: {sum(res)} passed, {len(res)-sum(res)} failed")

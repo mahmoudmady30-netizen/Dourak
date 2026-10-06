@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 340" role="img" aria-label="دورك">
+<defs>
+ <linearGradient id="b1" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#38b5dc"/><stop offset="1" stop-color="#2d8fdc"/></linearGradient>
+ <linearGradient id="b2" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#2d8fdc"/><stop offset="1" stop-color="#1976d2"/></linearGradient>
+ <linearGradient id="b3" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#34bdb2"/><stop offset="1" stop-color="#18a99e"/></linearGradient>
+ <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="6" flood-opacity=".12"/></filter>
+</defs>
+<g filter="url(#shadow)">
+ <circle cx="120" cy="97" r="61" fill="url(#b1)"/>
+ <path d="M45 264c0-69 34-111 75-111s75 42 75 111v18H45z" fill="url(#b1)"/>
+ <circle cx="285" cy="80" r="67" fill="url(#b2)"/>
+ <path d="M205 264c0-77 36-120 80-120s80 43 80 120v18H205z" fill="url(#b2)"/>
+ <circle cx="435" cy="107" r="60" fill="url(#b3)"/>
+ <path d="M360 264c0-68 34-109 75-109s75 41 75 109v18H360z" fill="url(#b3)"/>
+</g>
+<path d="M515 44a105 105 0 1 1-66 188l38-54a40 40 0 1 0 25-71z" fill="#ff8a16"/>
+<circle cx="524" cy="104" r="44" fill="#fff"/>
+<path d="M524 104v-28M524 104l22 13" fill="none" stroke="#ff8a16" stroke-width="8" stroke-linecap="round"/>
+</svg>

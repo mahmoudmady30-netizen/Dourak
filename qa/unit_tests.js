@@ -1,0 +1,36 @@
+const U=require(require('path').join(__dirname,'.units.generated.js')); const RealDate=Date; let pass=0,fail=0;
+const at=(hh,mm,fn)=>{ global.Date=class extends RealDate{constructor(...a){a.length?super(...a):super(2026,8,23,hh,mm,0)} static now(){return new RealDate(2026,8,23,hh,mm).getTime()}}; try{return fn()}finally{global.Date=RealDate} };
+const t=(name,got,exp)=>{ const ok=JSON.stringify(got)===JSON.stringify(exp); ok?pass++:fail++; if(!ok) console.log('FAIL',name,'got',JSON.stringify(got),'expected',JSON.stringify(exp)); };
+t('open 10-22 @12:00',at(12,0,()=>U.isWithinOpeningHours('10:00 - 22:00')),true);
+t('open 10-22 @09:59',at(9,59,()=>U.isWithinOpeningHours('10:00 - 22:00')),false);
+t('open 10-22 @22:00',at(22,0,()=>U.isWithinOpeningHours('10:00 - 22:00')),false);
+t('overnight 20-04 @23:30',at(23,30,()=>U.isWithinOpeningHours('20:00 - 04:00')),true);
+t('overnight 20-04 @02:00',at(2,0,()=>U.isWithinOpeningHours('20:00 - 04:00')),true);
+t('overnight 20-04 @12:00',at(12,0,()=>U.isWithinOpeningHours('20:00 - 04:00')),false);
+t('24h flag @03:00',at(3,0,()=>U.isWithinOpeningHours('10:00 - 22:00',true)),true);
+t('12h format "10 AM - 10 PM" @21:00',at(21,0,()=>U.isWithinOpeningHours('10 AM - 10 PM')),true);
+t('cutoff 21:00 @20:59',at(20,59,()=>U.isPastLastTokenTime('21:00','10:00 - 22:00')),false);
+t('cutoff 21:00 @21:00',at(21,0,()=>U.isPastLastTokenTime('21:00','10:00 - 22:00')),true);
+t('cutoff empty',at(23,0,()=>U.isPastLastTokenTime('','10:00 - 22:00')),false);
+t('overnight cutoff 02:00 @23:00',at(23,0,()=>U.isPastLastTokenTime('02:00','20:00 - 04:00')),false);
+t('overnight cutoff 02:00 @03:00',at(3,0,()=>U.isPastLastTokenTime('02:00','20:00 - 04:00')),true);
+t('phone 050…',U.normalizePhone('0501234567'),'971501234567');
+t('phone +971 spaced',U.normalizePhone('+971 50 123 4567'),'971501234567');
+t('phone 00971',U.normalizePhone('00971501234567'),'971501234567');
+t('phone Egypt +20',U.normalizePhone('+201001234567'),'201001234567');
+t('phone Arabic-Indic digits',U.normalizePhone('٠٥٠١٢٣٤٥٦٧'),'971501234567');
+t('filter clean Arabic',U.containsInappropriateLanguage('خدمة ممتازة'),false);
+t('filter bad word',U.containsInappropriateLanguage('you are shit'),true);
+t('filter no false positive "class"',U.containsInappropriateLanguage('the class was great'),false);
+t('filter no false positive "Dickens"',U.containsInappropriateLanguage('I read Dickens'),false);
+t('filter no false positive Arabic "كسب"',U.containsInappropriateLanguage('كسبت الوقت'),false);
+t('filter no false positive Arabic "مكسور"',U.containsInappropriateLanguage('الكرسي مكسور'),false);
+t('filter elongated evasion',U.containsInappropriateLanguage('shiiiit'),true);
+// extra coverage after the fix
+const T2=(n,g,e)=>t(n,g,e);
+['عكس الاتجاه','انعكاس الضوء','كسل الموظف','المكسيك','كسرة خبز','الخدمة زبدة','الكلب لطيف','classic assessment','Scunthorpe'].forEach(s=>T2('innocent: '+s,U.containsInappropriateLanguage(s),false));
+['يا كس','والكس','fucking slow','bitches','يا ابن الكلب','كلب ابن','متنـاك','قحبه','SHIT!!!'].forEach(s=>T2('caught: '+s,U.containsInappropriateLanguage(s),true));
+T2('phone Persian digits',U.normalizePhone('۰۵۰۱۲۳۴۵۶۷'),'971501234567');
+T2('phone mixed +٩٧١',U.normalizePhone('+٩٧١ ٥٠ ١٢٣ ٤٥٦٧'),'971501234567');
+
+console.log(`\nUNIT RESULTS: ${pass} passed, ${fail} failed`);

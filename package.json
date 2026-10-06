@@ -1,0 +1,7 @@
+{
+  "name": "dourak-v52",
+  "private": true,
+  "scripts": {
+    "test": "node tests/smoke.js"
+  }
+}
